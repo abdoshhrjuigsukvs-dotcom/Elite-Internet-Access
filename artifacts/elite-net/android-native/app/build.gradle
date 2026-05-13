@@ -1,0 +1,96 @@
+// ─── App-level build.gradle ──────────────────────────────────────────────────
+// Copy this to: android/app/build.gradle  (merge with the Expo-generated file)
+
+apply plugin: "com.android.application"
+apply plugin: "org.jetbrains.kotlin.android"
+apply plugin: "com.google.gms.google-services"   // Firebase
+
+android {
+    compileSdk rootProject.ext.compileSdkVersion
+    buildToolsVersion rootProject.ext.buildToolsVersion
+
+    namespace "com.elitenet.vpn"
+
+    defaultConfig {
+        applicationId "com.elitenet.vpn"
+        minSdk        rootProject.ext.minSdkVersion
+        targetSdk     rootProject.ext.targetSdkVersion
+        versionCode   1
+        versionName   "1.0.0"
+    }
+
+    // ── Signing config for Release APK ───────────────────────────────────────
+    // Run these commands first to create your keystore:
+    //
+    //   keytool -genkey -v \
+    //     -keystore elite-net-release.keystore \
+    //     -alias elite-net \
+    //     -keyalg RSA -keysize 2048 -validity 10000 \
+    //     -dname "CN=Elite Net, OU=Mobile, O=EliteNet, L=Cairo, S=Cairo, C=EG"
+    //
+    //   Move elite-net-release.keystore to android/app/elite-net-release.keystore
+    //
+    signingConfigs {
+        release {
+            storeFile     file("elite-net-release.keystore")
+            storePassword System.getenv("KEYSTORE_PASS") ?: "REPLACE_WITH_YOUR_PASSWORD"
+            keyAlias      "elite-net"
+            keyPassword   System.getenv("KEY_PASS")      ?: "REPLACE_WITH_YOUR_PASSWORD"
+        }
+    }
+
+    buildTypes {
+        debug {
+            debuggable true
+        }
+        release {
+            signingConfig     signingConfigs.release
+            minifyEnabled     true
+            shrinkResources   true
+            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+
+    // Include v2ray-core.aar from libs folder
+    repositories {
+        flatDir { dirs 'libs' }
+    }
+}
+
+dependencies {
+    // ── React Native (Expo-generated — do not remove) ────────────────────────
+    implementation("com.facebook.react:react-android")
+    implementation("com.facebook.react:hermes-android")
+
+    // ── V2RayCore — Full-device VPN tunnel ───────────────────────────────────
+    // Download from: https://github.com/2dust/v2rayNG/releases  (v2ray-core.aar)
+    // Place at:      android/app/libs/v2ray-core.aar
+    implementation(name: 'v2ray-core', ext: 'aar')
+    implementation "androidx.core:core-ktx:1.12.0"
+    implementation "androidx.localbroadcastmanager:localbroadcastmanager:1.1.0"
+
+    // ── Unity Ads SDK — Game ID 60907 ────────────────────────────────────────
+    implementation "com.unity3d.ads:unity-ads:4.9.2"
+
+    // ── Firebase Cloud Messaging ─────────────────────────────────────────────
+    implementation platform("com.google.firebase:firebase-bom:32.7.0")
+    implementation "com.google.firebase:firebase-messaging-ktx"
+    implementation "com.google.firebase:firebase-analytics-ktx"
+
+    // ── VPN service helpers ──────────────────────────────────────────────────
+    implementation "androidx.lifecycle:lifecycle-service:2.7.0"
+    implementation "androidx.work:work-runtime-ktx:2.9.0"
+}
+
+// ProGuard rules for Unity Ads and V2Ray
+// These are appended to proguard-rules.pro
+// -keep class com.unity3d.** { *; }
+// -keep class v2raycore.** { *; }

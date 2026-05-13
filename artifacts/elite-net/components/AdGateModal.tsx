@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import {
   Animated,
   Modal,
+  NativeModules,
   Platform,
   StyleSheet,
   Text,
@@ -13,7 +14,43 @@ import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import { useVpn } from "@/contexts/VpnContext";
 
-const AD_WATCH_DURATION = 5;
+// ── Unity Ads Native Bridge ──────────────────────────────────────────────────
+// In a native build (after expo prebuild + Android Studio),
+// NativeModules.UnityAdsModule is the real Unity Ads SDK.
+// In Expo Go / web, we fall back to a simulated 5-second ad.
+const { UnityAdsModule } = NativeModules as {
+  UnityAdsModule?: {
+    initialize: () => Promise<boolean>;
+    showGateAd: () => Promise<boolean>;
+    showBoosterAd: () => Promise<boolean>;
+  };
+};
+
+const UNITY_AVAILABLE = !!UnityAdsModule;
+
+// Simulate a 5-second ad watch (Expo Go / dev only)
+const SIMULATED_AD_DURATION = 5;
+
+async function showUnityGateAd(): Promise<boolean> {
+  if (UNITY_AVAILABLE) {
+    return UnityAdsModule!.showGateAd();
+  }
+  // Expo Go fallback — simulate ad with countdown
+  return new Promise((resolve) =>
+    setTimeout(() => resolve(true), SIMULATED_AD_DURATION * 1000)
+  );
+}
+
+async function showUnityBoosterAd(): Promise<boolean> {
+  if (UNITY_AVAILABLE) {
+    return UnityAdsModule!.showBoosterAd();
+  }
+  return new Promise((resolve) =>
+    setTimeout(() => resolve(true), SIMULATED_AD_DURATION * 1000)
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 export function AdGateModal() {
   const {
@@ -26,32 +63,34 @@ export function AdGateModal() {
     startWatchAd,
   } = useVpn();
 
-  const [countdown, setCountdown] = useState(AD_WATCH_DURATION);
+  const [countdown, setCountdown] = useState(SIMULATED_AD_DURATION);
   const [watching, setWatching] = useState(false);
+  const [adError, setAdError] = useState<string | null>(null);
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const progressAnim = useRef(new Animated.Value(0)).current;
   const progressAnim2 = useRef(new Animated.Value(0)).current;
 
-  const isAdGate = phase === "ad-gate";
+  const isAdGate     = phase === "ad-gate";
   const isBoosterGate = phase === "booster-gate";
   const isWatchingAd = phase === "watching-ad";
-  const isVisible = isAdGate || isBoosterGate || isWatchingAd;
+  const isVisible    = isAdGate || isBoosterGate || isWatchingAd;
 
   const isPeriodic = adSource === "periodic";
-  const isBooster = adSource === "booster" || isBoosterGate;
+  const isBooster  = adSource === "booster" || isBoosterGate;
 
-  const adsRequired = isBooster ? 5 : isPeriodic ? 1 : 3;
-  const adsWatched = isBooster ? boosterAdsWatched : 0;
+  const adsRequired  = isBooster ? 5 : isPeriodic ? 1 : 3;
   const gateProgress = isBooster
     ? boosterAdsWatched
     : adSource === "gate"
       ? gateAdsWatched
       : 0;
 
+  // Reset state when leaving watching phase
   useEffect(() => {
     if (!isWatchingAd) {
       setWatching(false);
-      setCountdown(AD_WATCH_DURATION);
+      setAdError(null);
+      setCountdown(SIMULATED_AD_DURATION);
       if (countdownRef.current) {
         clearInterval(countdownRef.current);
         countdownRef.current = null;
@@ -61,14 +100,37 @@ export function AdGateModal() {
     }
   }, [isWatchingAd]);
 
+  // When Unity Ads is available, show the real SDK ad.
+  // When it's not (Expo Go), run the simulated countdown.
   useEffect(() => {
-    if (isWatchingAd && !watching) {
-      setWatching(true);
-      setCountdown(AD_WATCH_DURATION);
+    if (!isWatchingAd || watching) return;
+    setWatching(true);
+    setAdError(null);
+
+    if (UNITY_AVAILABLE) {
+      // ── Real Unity Ads path ────────────────────────────────────────────
+      const adFn = isBooster ? showUnityBoosterAd : showUnityGateAd;
+      adFn()
+        .then((completed) => {
+          if (completed) {
+            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+            setTimeout(() => finishAdWatch(), 300);
+          } else {
+            setAdError("Ad skipped — please watch the full ad to continue.");
+            setWatching(false);
+          }
+        })
+        .catch((err: Error) => {
+          setAdError(`Ad failed to load. Please try again. (${err?.message ?? "unknown error"})`);
+          setWatching(false);
+        });
+    } else {
+      // ── Expo Go / dev simulation path ──────────────────────────────────
+      setCountdown(SIMULATED_AD_DURATION);
 
       Animated.timing(progressAnim2, {
         toValue: 1,
-        duration: AD_WATCH_DURATION * 1000,
+        duration: SIMULATED_AD_DURATION * 1000,
         useNativeDriver: false,
       }).start();
 
@@ -78,15 +140,14 @@ export function AdGateModal() {
             clearInterval(countdownRef.current!);
             countdownRef.current = null;
             Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-            setTimeout(() => {
-              finishAdWatch();
-            }, 300);
+            setTimeout(() => finishAdWatch(), 300);
             return 0;
           }
           return prev - 1;
         });
       }, 1000);
     }
+
     return () => {
       if (countdownRef.current) {
         clearInterval(countdownRef.current);
@@ -97,6 +158,7 @@ export function AdGateModal() {
 
   const handleWatchAd = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    setAdError(null);
     startWatchAd();
   };
 
@@ -131,15 +193,35 @@ export function AdGateModal() {
 
         {isWatchingAd ? (
           <View style={styles.watchingContainer}>
-            <View style={styles.adScreen}>
-              <Ionicons name="play-circle" size={52} color="#FFD700" />
-              <Text style={styles.adLabel}>AD PLAYING</Text>
-              <Text style={styles.adCountdown}>{countdown}s</Text>
-            </View>
+            {UNITY_AVAILABLE ? (
+              // Native build — Unity Ads takes over the full screen.
+              // This view is shown briefly while the SDK loads.
+              <View style={styles.adScreen}>
+                <Ionicons name="hourglass" size={40} color="#FFD700" />
+                <Text style={styles.adLabel}>LOADING AD…</Text>
+                {adError && <Text style={styles.adError}>{adError}</Text>}
+              </View>
+            ) : (
+              // Expo Go — simulated countdown UI
+              <View style={styles.adScreen}>
+                <Ionicons name="play-circle" size={52} color="#FFD700" />
+                <Text style={styles.adLabel}>AD PLAYING (SIMULATED)</Text>
+                <Text style={styles.adCountdown}>{countdown}s</Text>
+              </View>
+            )}
             <View style={styles.progressTrack}>
               <Animated.View style={[styles.progressFill, { width: progressWidth }]} />
             </View>
-            <Text style={styles.watchingNote}>Please watch the full ad to continue</Text>
+            <Text style={styles.watchingNote}>
+              {UNITY_AVAILABLE
+                ? "Please watch the full ad — do not close"
+                : "Simulated ad • Unity Ads active in native build"}
+            </Text>
+            {adError && (
+              <TouchableOpacity style={styles.retryBtn} onPress={handleWatchAd}>
+                <Text style={styles.retryText}>TRY AGAIN</Text>
+              </TouchableOpacity>
+            )}
           </View>
         ) : (
           <View style={styles.gateContainer}>
@@ -154,14 +236,17 @@ export function AdGateModal() {
             <Text style={styles.gateTitle}>{gateTitle}</Text>
             <Text style={styles.gateSubtitle}>{gateSubtitle}</Text>
 
+            {!UNITY_AVAILABLE && (
+              <View style={styles.devBadge}>
+                <Text style={styles.devBadgeText}>DEV MODE — SIMULATED ADS</Text>
+              </View>
+            )}
+
             <View style={styles.dotsRow}>
               {Array.from({ length: adsRequired }, (_, i) => (
                 <View
                   key={i}
-                  style={[
-                    styles.dot,
-                    i < gateProgress && styles.dotFilled,
-                  ]}
+                  style={[styles.dot, i < gateProgress && styles.dotFilled]}
                 />
               ))}
             </View>
@@ -169,6 +254,8 @@ export function AdGateModal() {
             <Text style={styles.progressText}>
               {gateProgress} / {adsRequired} completed
             </Text>
+
+            {adError && <Text style={styles.adError}>{adError}</Text>}
 
             <TouchableOpacity
               style={styles.watchBtn}
@@ -267,8 +354,23 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontFamily: "Inter_400Regular",
     textAlign: "center",
-    marginBottom: 28,
+    marginBottom: 16,
     lineHeight: 20,
+  },
+  devBadge: {
+    backgroundColor: "rgba(255,165,0,0.12)",
+    borderWidth: 1,
+    borderColor: "rgba(255,165,0,0.3)",
+    borderRadius: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    marginBottom: 20,
+  },
+  devBadgeText: {
+    color: "rgba(255,165,0,0.8)",
+    fontSize: 10,
+    fontFamily: "Inter_600SemiBold",
+    letterSpacing: 1.5,
   },
   dotsRow: {
     flexDirection: "row",
@@ -292,7 +394,15 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontFamily: "Inter_500Medium",
     letterSpacing: 1,
-    marginBottom: 28,
+    marginBottom: 20,
+  },
+  adError: {
+    color: "#FF6B6B",
+    fontSize: 12,
+    fontFamily: "Inter_400Regular",
+    textAlign: "center",
+    marginBottom: 16,
+    lineHeight: 18,
   },
   watchBtn: {
     flexDirection: "row",
@@ -365,5 +475,19 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontFamily: "Inter_400Regular",
     textAlign: "center",
+  },
+  retryBtn: {
+    marginTop: 16,
+    paddingVertical: 12,
+    paddingHorizontal: 32,
+    borderRadius: 50,
+    borderWidth: 1,
+    borderColor: "#FFD700",
+  },
+  retryText: {
+    color: "#FFD700",
+    fontSize: 13,
+    fontFamily: "Inter_700Bold",
+    letterSpacing: 2,
   },
 });
