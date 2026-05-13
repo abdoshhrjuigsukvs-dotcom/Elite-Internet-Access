@@ -14,10 +14,12 @@ interface PushToken {
 const registeredTokens: Map<string, PushToken> = new Map();
 
 interface NotificationConfig {
-  dailyReminderMessage: string;
-  sessionExpiryMessage: string;
   dailyReminderTitle: string;
+  dailyReminderMessage: string;
   sessionExpiryTitle: string;
+  sessionExpiryMessage: string;
+  scheduledTime: string;
+  schedulerEnabled: boolean;
 }
 
 let notificationConfig: NotificationConfig = {
@@ -27,26 +29,73 @@ let notificationConfig: NotificationConfig = {
   sessionExpiryTitle: "Elite Net — Session Ended",
   sessionExpiryMessage:
     "Your 2-hour daily internet session has ended. Come back tomorrow for more free access.",
+  scheduledTime: "09:00 Cairo (UTC+2) — 07:00 UTC",
+  schedulerEnabled: true,
 };
 
-function getFirebaseAdmin() {
+function getFirebaseMessaging() {
   const serviceAccountJson = process.env["FIREBASE_SERVICE_ACCOUNT"];
   if (!serviceAccountJson) return null;
 
-  if (adminApp) return firebaseAdmin;
+  if (adminApp) {
+    return (firebaseAdmin as typeof import("firebase-admin")).messaging();
+  }
 
   try {
-    const serviceAccount = JSON.parse(serviceAccountJson);
-    const admin = require("firebase-admin");
+    const serviceAccount = JSON.parse(serviceAccountJson) as Record<
+      string,
+      unknown
+    >;
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const admin = require("firebase-admin") as typeof import("firebase-admin");
     adminApp = admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount),
+      credential: admin.credential.cert(
+        serviceAccount as import("firebase-admin").ServiceAccount
+      ),
     });
     firebaseAdmin = admin;
-    return firebaseAdmin;
-  } catch (err) {
+    return admin.messaging();
+  } catch {
     return null;
   }
 }
+
+export async function sendDailyReminderToAll(): Promise<{
+  sent: number;
+  total: number;
+}> {
+  const messaging = getFirebaseMessaging();
+  if (!messaging) return { sent: 0, total: 0 };
+
+  const tokens = Array.from(registeredTokens.values()).map((t) => t.token);
+  if (tokens.length === 0) return { sent: 0, total: 0 };
+
+  let sent = 0;
+  for (const token of tokens) {
+    try {
+      await messaging.send({
+        token,
+        notification: {
+          title: notificationConfig.dailyReminderTitle,
+          body: notificationConfig.dailyReminderMessage,
+        },
+        android: {
+          priority: "high",
+          notification: {
+            sound: "default",
+            channelId: "elite-net-reminders",
+          },
+        },
+      });
+      sent++;
+    } catch {
+      // token may be stale — skip
+    }
+  }
+  return { sent, total: tokens.length };
+}
+
+// ─── Routes ────────────────────────────────────────────────────────────────
 
 router.get("/notifications/status", (_req: Request, res: Response) => {
   const hasFirebase = !!process.env["FIREBASE_SERVICE_ACCOUNT"];
@@ -66,13 +115,11 @@ router.post("/notifications/register", (req: Request, res: Response) => {
     res.status(400).json({ error: "token is required" });
     return;
   }
-
   registeredTokens.set(token, {
     token,
     platform: platform ?? "unknown",
     registeredAt: new Date().toISOString(),
   });
-
   res.json({ success: true, registeredDevices: registeredTokens.size });
 });
 
@@ -82,20 +129,17 @@ router.delete("/notifications/register", (req: Request, res: Response) => {
   res.json({ success: true });
 });
 
-router.put(
-  "/notifications/config",
-  (req: Request, res: Response) => {
-    const body = req.body as Partial<NotificationConfig>;
-    notificationConfig = { ...notificationConfig, ...body };
-    res.json({ success: true, config: notificationConfig });
-  }
-);
+router.put("/notifications/config", (req: Request, res: Response) => {
+  const body = req.body as Partial<NotificationConfig>;
+  notificationConfig = { ...notificationConfig, ...body };
+  res.json({ success: true, config: notificationConfig });
+});
 
 router.post(
   "/notifications/send-daily",
-  async (req: Request, res: Response) => {
-    const admin = getFirebaseAdmin();
-    if (!admin) {
+  async (_req: Request, res: Response) => {
+    const messaging = getFirebaseMessaging();
+    if (!messaging) {
       res.status(503).json({
         error:
           "Firebase not configured. Add FIREBASE_SERVICE_ACCOUNT secret to the server.",
@@ -109,9 +153,7 @@ router.post(
       return;
     }
 
-    const messaging = (admin as typeof import("firebase-admin")).messaging();
     const results: { token: string; success: boolean; error?: string }[] = [];
-
     for (const token of tokens) {
       try {
         await messaging.send({
@@ -122,13 +164,19 @@ router.post(
           },
           android: {
             priority: "high",
-            notification: { sound: "default", channelId: "elite-net-reminders" },
+            notification: {
+              sound: "default",
+              channelId: "elite-net-reminders",
+            },
           },
         });
         results.push({ token, success: true });
       } catch (err: unknown) {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        results.push({ token, success: false, error: errMsg });
+        results.push({
+          token,
+          success: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
     }
 
@@ -139,9 +187,9 @@ router.post(
 
 router.post(
   "/notifications/send-expiry",
-  async (req: Request, res: Response) => {
-    const admin = getFirebaseAdmin();
-    if (!admin) {
+  async (_req: Request, res: Response) => {
+    const messaging = getFirebaseMessaging();
+    if (!messaging) {
       res.status(503).json({ error: "Firebase not configured." });
       return;
     }
@@ -152,9 +200,7 @@ router.post(
       return;
     }
 
-    const messaging = (admin as typeof import("firebase-admin")).messaging();
     const results: { token: string; success: boolean; error?: string }[] = [];
-
     for (const token of tokens) {
       try {
         await messaging.send({
@@ -165,13 +211,19 @@ router.post(
           },
           android: {
             priority: "high",
-            notification: { sound: "default", channelId: "elite-net-alerts" },
+            notification: {
+              sound: "default",
+              channelId: "elite-net-alerts",
+            },
           },
         });
         results.push({ token, success: true });
       } catch (err: unknown) {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        results.push({ token, success: false, error: errMsg });
+        results.push({
+          token,
+          success: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
     }
 
@@ -183,13 +235,17 @@ router.post(
 router.post(
   "/notifications/send-custom",
   async (req: Request, res: Response) => {
-    const admin = getFirebaseAdmin();
-    if (!admin) {
+    const messaging = getFirebaseMessaging();
+    if (!messaging) {
       res.status(503).json({ error: "Firebase not configured." });
       return;
     }
 
-    const { title, body, tokens: targetTokens } = req.body as {
+    const {
+      title,
+      body,
+      tokens: targetTokens,
+    } = req.body as {
       title?: string;
       body?: string;
       tokens?: string[];
@@ -209,9 +265,7 @@ router.post(
       return;
     }
 
-    const messaging = (admin as typeof import("firebase-admin")).messaging();
     const results: { token: string; success: boolean; error?: string }[] = [];
-
     for (const token of tokens) {
       try {
         await messaging.send({
@@ -219,13 +273,19 @@ router.post(
           notification: { title, body },
           android: {
             priority: "high",
-            notification: { sound: "default", channelId: "elite-net-reminders" },
+            notification: {
+              sound: "default",
+              channelId: "elite-net-reminders",
+            },
           },
         });
         results.push({ token, success: true });
       } catch (err: unknown) {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        results.push({ token, success: false, error: errMsg });
+        results.push({
+          token,
+          success: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
     }
 
