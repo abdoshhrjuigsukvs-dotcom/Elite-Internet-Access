@@ -95,17 +95,30 @@ export default function HomeScreen() {
             </View>
             <Text style={styles.logoText}>ELITE NET</Text>
           </View>
-          <TouchableOpacity
-            onPress={() => router.push("/privacy")}
-            style={styles.settingsBtn}
-            activeOpacity={0.7}
-          >
-            <Ionicons
-              name="information-circle-outline"
-              size={24}
-              color="rgba(255,215,0,0.6)"
-            />
-          </TouchableOpacity>
+          <View style={styles.headerRight}>
+            <TouchableOpacity
+              onPress={() => router.push("/admin")}
+              style={styles.settingsBtn}
+              activeOpacity={0.7}
+            >
+              <Ionicons
+                name="settings-outline"
+                size={22}
+                color="rgba(255,215,0,0.6)"
+              />
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={() => router.push("/privacy")}
+              style={styles.settingsBtn}
+              activeOpacity={0.7}
+            >
+              <Ionicons
+                name="information-circle-outline"
+                size={22}
+                color="rgba(255,215,0,0.6)"
+              />
+            </TouchableOpacity>
+          </View>
         </View>
 
         {/* Status badge */}
@@ -267,6 +280,11 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontFamily: "Inter_700Bold",
     letterSpacing: 4,
+  },
+  headerRight: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
   },
   settingsBtn: {
     padding: 4,
