@@ -1,0 +1,27 @@
+kind = "mobile"
+previewPath = "/"
+title = "Elite Net"
+version = "1.0.0"
+id = "artifacts/elite-net"
+router = "expo-domain"
+
+[[integratedSkills]]
+name = "expo"
+version = "1.0.0"
+
+[[services]]
+ensurePreviewReachable = "/status"
+name = "expo"
+paths = [ "/" ]
+localPort = 23685
+
+[services.development]
+run = "pnpm --filter @workspace/elite-net run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/elite-net", "run", "build" ]
+run = [ "pnpm", "--filter", "@workspace/elite-net", "run", "serve" ]
+
+[services.env]
+PORT = "23685"
+BASE_PATH = "/"

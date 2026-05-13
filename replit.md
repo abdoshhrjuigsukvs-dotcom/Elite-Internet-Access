@@ -1,36 +1,47 @@
-# [Project name]
+# Elite Net
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+A futuristic, ultra-premium VPN app UI for mobile (Expo/React Native) with a 2-hour daily free internet limit, ad-gate system, and glassmorphism design.
 
 ## Run & Operate
 
+- `pnpm --filter @workspace/elite-net run dev` — run the Expo mobile app
 - `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
 - `pnpm run typecheck` — full typecheck across all packages
-- `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+- Scan the QR code from the Expo workflow to preview on a real device via Expo Go
 
 ## Stack
 
 - pnpm workspaces, Node.js 24, TypeScript 5.9
+- Mobile: Expo SDK 54, React Native, Expo Router
 - API: Express 5
-- DB: PostgreSQL + Drizzle ORM
-- Validation: Zod (`zod/v4`), `drizzle-zod`
-- API codegen: Orval (from OpenAPI spec)
-- Build: esbuild (CJS bundle)
+- Animations: react-native-reanimated, Animated API
+- SVG: react-native-svg (circular timer ring)
+- Storage: AsyncStorage (daily usage persistence)
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `artifacts/elite-net/` — Expo mobile app
+  - `app/(tabs)/index.tsx` — Main VPN screen
+  - `app/privacy.tsx` — Privacy Policy screen
+  - `contexts/VpnContext.tsx` — All VPN state and timer logic
+  - `components/EnergyCore.tsx` — Animated 3D connection button
+  - `components/TimerRing.tsx` — SVG circular progress timer
+  - `components/ParticleField.tsx` — Floating gold particle background
+  - `components/AdGateModal.tsx` — Ad gate bottom sheet modal
+  - `components/GlassCard.tsx` — Glassmorphism card component
+  - `constants/colors.ts` — Design tokens (black + digital gold palette)
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- Frontend-only app using AsyncStorage for daily session persistence (no backend needed)
+- VPN state machine: idle → ad-gate → watching-ad → connecting → connected → time-up
+- AdSource tracking ('gate' | 'booster' | 'periodic') to handle 3 different ad scenarios
+- Particle field uses static data generated at module-load time to avoid re-renders
+- Timer and periodic-ad countdown both live in VpnContext to keep state co-located
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+Elite Net is a mobile VPN app that grants 2 hours of free internet per day. Users must watch 3 ads (via Unity Ads Game ID 60907) to unlock their connection. Every 15 minutes a periodic ad triggers. Users can extend their session by 30 minutes by watching 5 additional ads.
 
 ## User preferences
 
@@ -38,7 +49,10 @@ _Populate as you build — explicit user instructions worth remembering across s
 
 ## Gotchas
 
-_Populate as you build — sharp edges, "always run X before Y" rules._
+- Full-device VPN (V2RayCore), Unity Ads SDK, and Android Foreground Service require native Android modules — not available in Expo Go. These need a native Android build.
+- Firebase FCM for push notifications also requires native setup with google-services.json.
+- `useNativeDriver: true` is not supported on web — expected warning, doesn't affect native.
+- Privacy Policy URL: https://sites.google.com/view/elite-loot-policy/
 
 ## Pointers
 
