@@ -1,0 +1,222 @@
+name: Build Signed APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:          # allow manual trigger from GitHub UI
+
+jobs:
+  build:
+    name: Build & Sign Release APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      # ── 1. Checkout ───────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Java 17 (required by Android Gradle) ───────────────────────────
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+          cache: gradle
+
+      # ── 3. Node + pnpm ────────────────────────────────────────────────────
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+          run_install: false
+
+      # ── 4. Install JS dependencies ────────────────────────────────────────
+      - name: Install dependencies
+        working-directory: artifacts/elite-net
+        run: pnpm install --frozen-lockfile
+
+      # ── 5. Expo Prebuild (generates android/ folder) ──────────────────────
+      - name: Expo Prebuild
+        working-directory: artifacts/elite-net
+        run: |
+          npx expo prebuild --platform android --clean --non-interactive
+        env:
+          EXPO_NO_DOTENV: 1
+
+      # ── 6. Copy prepared native source files ──────────────────────────────
+      - name: Copy native Kotlin source files
+        working-directory: artifacts/elite-net
+        run: |
+          cp -r android-native/app/src/main/java/com/elitenet/vpn/. \
+                android/app/src/main/java/com/elitenet/vpn/
+          cp android-native/app/proguard-rules.pro android/app/proguard-rules.pro
+          echo "✅ Kotlin sources copied"
+
+      # ── 7. Merge AndroidManifest additions ────────────────────────────────
+      - name: Patch AndroidManifest.xml
+        working-directory: artifacts/elite-net/android
+        run: |
+          MANIFEST="app/src/main/AndroidManifest.xml"
+          # Add VPN service before </application>
+          sed -i 's|</application>|    <service android:name=".V2RayVpnService" android:permission="android.permission.BIND_VPN_SERVICE" android:exported="false" android:foregroundServiceType="connectedDevice"><intent-filter><action android:name="android.net.VpnService"/></intent-filter></service>\n    <service android:name=".EliteFirebaseMessagingService" android:exported="false"><intent-filter><action android:name="com.google.firebase.MESSAGING_EVENT"/></intent-filter></service>\n    <meta-data android:name="com.google.firebase.messaging.default_notification_channel_id" android:value="elite-net-reminders"/>\n</application>|' "$MANIFEST"
+          # Add permissions before <application>
+          sed -i 's|<application|<uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"/>\n    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <uses-permission android:name="android.permission.WAKE_LOCK"/>\n    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE"/>\n    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>\n    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>\n    <application|' "$MANIFEST"
+          echo "✅ AndroidManifest patched"
+
+      # ── 8. Place google-services.json (from GitHub Secret) ────────────────
+      - name: Place google-services.json
+        working-directory: artifacts/elite-net/android/app
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          echo "$GOOGLE_SERVICES_JSON" > google-services.json
+          echo "✅ google-services.json placed"
+
+      # ── 9. Download & place V2RayCore AAR ─────────────────────────────────
+      # Option A: decode from GitHub Secret (V2RAY_AAR_BASE64)
+      # Option B: download from GitHub Releases (uncomment if no secret set)
+      - name: Place V2RayCore AAR
+        working-directory: artifacts/elite-net/android/app
+        env:
+          V2RAY_AAR_BASE64: ${{ secrets.V2RAY_AAR_BASE64 }}
+        run: |
+          mkdir -p libs
+          if [ -n "$V2RAY_AAR_BASE64" ]; then
+            echo "$V2RAY_AAR_BASE64" | base64 --decode > libs/v2ray-core.aar
+            echo "✅ V2RayCore AAR decoded from secret"
+          else
+            echo "⚠️  V2RAY_AAR_BASE64 not set — downloading from GitHub Releases..."
+            curl -L -o libs/v2ray-core.aar \
+              "https://github.com/2dust/v2rayNG/releases/download/1.9.30/v2ray-core.aar" \
+              || { echo "❌ Download failed. Set V2RAY_AAR_BASE64 secret."; exit 1; }
+            echo "✅ V2RayCore AAR downloaded"
+          fi
+
+      # ── 10. Patch V2Ray server credentials (from GitHub Secrets) ──────────
+      - name: Patch VPN server credentials
+        working-directory: artifacts/elite-net/android/app/src/main/java/com/elitenet/vpn
+        env:
+          VPN_SERVER_HOST: ${{ secrets.VPN_SERVER_HOST }}
+          VPN_SERVER_PORT: ${{ secrets.VPN_SERVER_PORT }}
+          VPN_UUID: ${{ secrets.VPN_UUID }}
+          VPN_WS_PATH: ${{ secrets.VPN_WS_PATH }}
+        run: |
+          HOST="${VPN_SERVER_HOST:-YOUR_SERVER_IP_OR_DOMAIN}"
+          PORT="${VPN_SERVER_PORT:-443}"
+          UUID="${VPN_UUID:-YOUR-VMESS-UUID-HERE}"
+          PATH_="${VPN_WS_PATH:-/elite}"
+          sed -i "s|YOUR_SERVER_IP_OR_DOMAIN|$HOST|g" V2RayVpnService.kt
+          sed -i "s|private const val SERVER_PORT = 443|private const val SERVER_PORT = $PORT|g" V2RayVpnService.kt
+          sed -i "s|YOUR-VMESS-UUID-HERE|$UUID|g" V2RayVpnService.kt
+          sed -i "s|private const val WS_PATH = \"/elite\"|private const val WS_PATH = \"$PATH_\"|g" V2RayVpnService.kt
+          # Uncomment the V2Ray start call
+          sed -i 's|// v2raycore.V2Ray.startV2Ray(config, fd)|v2raycore.V2Ray.startV2Ray(config, fd)|g' V2RayVpnService.kt
+          echo "✅ VPN credentials patched"
+
+      # ── 11. Patch build.gradle files ──────────────────────────────────────
+      - name: Patch app build.gradle
+        working-directory: artifacts/elite-net/android/app
+        run: |
+          # Apply Google Services plugin
+          sed -i '1s|^|apply plugin: "com.google.gms.google-services"\n|' build.gradle
+          # Add flatDir for local AARs
+          cat >> build.gradle << 'EOF'
+
+          android.repositories {
+              flatDir { dirs 'libs' }
+          }
+
+          dependencies {
+              implementation(name: 'v2ray-core', ext: 'aar')
+              implementation "androidx.core:core-ktx:1.12.0"
+              implementation "androidx.localbroadcastmanager:localbroadcastmanager:1.1.0"
+              implementation "com.unity3d.ads:unity-ads:4.9.2"
+              implementation platform("com.google.firebase:firebase-bom:32.7.0")
+              implementation "com.google.firebase:firebase-messaging-ktx"
+              implementation "com.google.firebase:firebase-analytics-ktx"
+              implementation "androidx.lifecycle:lifecycle-service:2.7.0"
+          }
+          EOF
+          echo "✅ app/build.gradle patched"
+
+      - name: Patch project build.gradle
+        working-directory: artifacts/elite-net/android
+        run: |
+          # Add Google Services classpath
+          sed -i 's|dependencies {|dependencies {\n        classpath("com.google.gms:google-services:4.4.0")|' build.gradle
+          # Add Unity Ads repo
+          sed -i 's|allprojects {|allprojects {\n    repositories {\n        maven { url "https://unityads.unity3d.com/ivysettings.xml" }\n    }|' build.gradle || true
+          echo "✅ project build.gradle patched"
+
+      # ── 12. Decode keystore (from GitHub Secret) ──────────────────────────
+      - name: Decode signing keystore
+        working-directory: artifacts/elite-net/android/app
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 --decode > elite-net-release.keystore
+          echo "✅ Keystore decoded"
+
+      # ── 13. Build Release APK ─────────────────────────────────────────────
+      - name: Build Release APK
+        working-directory: artifacts/elite-net/android
+        env:
+          KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASS: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease \
+            -Pandroid.injected.signing.store.file=app/elite-net-release.keystore \
+            -Pandroid.injected.signing.store.password="$KEYSTORE_PASS" \
+            -Pandroid.injected.signing.key.alias=elite-net \
+            -Pandroid.injected.signing.key.password="$KEY_PASS" \
+            --no-daemon \
+            --stacktrace
+
+      # ── 14. Rename APK with version + date ────────────────────────────────
+      - name: Rename APK
+        working-directory: artifacts/elite-net/android
+        run: |
+          DATE=$(date +%Y%m%d)
+          mv app/build/outputs/apk/release/app-release.apk \
+             app/build/outputs/apk/release/EliteNet-v1.0.0-${DATE}-release.apk
+          echo "✅ APK renamed"
+
+      # ── 15. Upload APK as downloadable artifact ───────────────────────────
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: EliteNet-Release-APK
+          path: artifacts/elite-net/android/app/build/outputs/apk/release/*.apk
+          retention-days: 30
+
+      # ── 16. Create GitHub Release with APK (on push to main) ──────────────
+      - name: Create GitHub Release
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.0-build.${{ github.run_number }}
+          name: "Elite Net v1.0.0 (Build #${{ github.run_number }})"
+          body: |
+            ## Elite Net — Signed Release APK
+            Automatically built and signed from commit `${{ github.sha }}`.
+
+            ### Download
+            Download `EliteNet-*-release.apk` from the assets below and install on your Android device.
+
+            ### Installation
+            1. Download the APK to your Android phone
+            2. Go to Settings → Security → Install unknown apps → Allow
+            3. Open the APK file to install
+          files: artifacts/elite-net/android/app/build/outputs/apk/release/*.apk
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

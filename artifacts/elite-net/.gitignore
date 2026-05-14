@@ -17,7 +17,13 @@ android/
 *.p8
 *.p12
 *.key
+*.keystore
+*.keystore.b64
 *.mobileprovision
+
+# Secrets — never commit these
+google-services.json
+GoogleService-Info.plist
 
 # Metro
 .metro-health-check*
