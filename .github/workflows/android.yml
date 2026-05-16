@@ -1,4 +1,4 @@
-name: Build Signed APK + AAB
+name: Build APK + AAB
 
 # Triggers: every push to main/master, or manual run from GitHub UI
 on:
@@ -7,6 +7,184 @@ on:
   workflow_dispatch:
 
 jobs:
+  # ════════════════════════════════════════════════════════════════════════════
+  # JOB 1 — Debug APK (fast, no secrets needed, runs on every push)
+  # Great for quick testing before setting up signing secrets.
+  # ════════════════════════════════════════════════════════════════════════════
+  build-debug:
+    name: Build Debug APK (JDK 17)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # JDK 17 — required by AGP 8.4 / Gradle 8.7
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+          cache: gradle
+
+      - name: Verify Java 17
+        run: java -version
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+          run_install: false
+
+      - name: Remove conflicting lock files
+        run: |
+          find . -maxdepth 3 \
+            -not -path "*/node_modules/*" \
+            -not -path "*/.git/*" \
+            \( -name "yarn.lock" -o -name "package-lock.json" \) \
+            -delete -print || true
+
+      - name: Install JS dependencies
+        working-directory: artifacts/elite-net
+        run: pnpm install --frozen-lockfile
+
+      - name: Expo Prebuild
+        working-directory: artifacts/elite-net
+        run: npx expo prebuild --platform android --clean --non-interactive
+        env:
+          EXPO_NO_DOTENV: 1
+
+      - name: Copy Kotlin sources + security config
+        working-directory: artifacts/elite-net
+        run: |
+          cp -r android-native/app/src/main/java/com/elitenet/vpn/. \
+                android/app/src/main/java/com/elitenet/vpn/
+          cp android-native/app/proguard-rules.pro android/app/proguard-rules.pro
+          mkdir -p android/app/src/main/res/xml
+          cp android-native/app/src/main/res/xml/network_security_config.xml \
+             android/app/src/main/res/xml/network_security_config.xml
+
+      - name: Pin Gradle 8.7
+        working-directory: artifacts/elite-net/android
+        run: |
+          cat > gradle/wrapper/gradle-wrapper.properties << 'EOF'
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-8.7-bin.zip
+          networkTimeout=10000
+          validateDistributionUrl=true
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          EOF
+
+      - name: Patch AndroidManifest.xml
+        working-directory: artifacts/elite-net/android
+        run: |
+          MANIFEST="app/src/main/AndroidManifest.xml"
+          sed -i 's|android:theme="@style/AppTheme"|android:theme="@style/AppTheme"\n        android:networkSecurityConfig="@xml/network_security_config"\n        android:allowBackup="false"|' "$MANIFEST" || true
+          sed -i 's|</application>|    <service android:name=".V2RayVpnService" android:exported="false" android:permission="android.permission.BIND_VPN_SERVICE" android:foregroundServiceType="connectedDevice"><intent-filter><action android:name="android.net.VpnService"/></intent-filter></service>\n    <service android:name=".EliteFirebaseMessagingService" android:exported="false"><intent-filter><action android:name="com.google.firebase.MESSAGING_EVENT"/></intent-filter></service>\n    <meta-data android:name="com.google.firebase.messaging.default_notification_channel_id" android:value="elite-net-reminders"/>\n    <receiver android:name=".BootReceiver" android:exported="true"><intent-filter><action android:name="android.intent.action.BOOT_COMPLETED"/></intent-filter></receiver>\n</application>|' "$MANIFEST"
+          sed -i 's|<application |<uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"/>\n    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <uses-permission android:name="android.permission.WAKE_LOCK"/>\n    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>\n    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>\n    <application |' "$MANIFEST"
+
+      # Create a placeholder google-services.json for debug builds
+      # (Firebase won't work, but the build won't fail)
+      - name: Create placeholder google-services.json
+        working-directory: artifacts/elite-net/android/app
+        run: |
+          cat > google-services.json << 'EOF'
+          {
+            "project_info": {
+              "project_number": "000000000000",
+              "project_id": "elite-loot",
+              "storage_bucket": "elite-loot.appspot.com"
+            },
+            "client": [{
+              "client_info": {
+                "mobilesdk_app_id": "1:000000000000:android:0000000000000000",
+                "android_client_info": { "package_name": "com.elitenet.vpn" }
+              },
+              "api_key": [{ "current_key": "placeholder_debug_key" }],
+              "services": {}
+            }],
+            "configuration_version": "1"
+          }
+          EOF
+          echo "✅ Placeholder google-services.json created for debug build"
+
+      # Create a placeholder v2ray-core.aar (empty JAR) for debug build
+      # VPN won't connect, but the app compiles and UI works fully.
+      - name: Create placeholder V2RayCore AAR
+        working-directory: artifacts/elite-net/android/app
+        run: |
+          mkdir -p libs
+          # Create minimal valid AAR (empty zip with .aar extension)
+          echo "PK\x05\x06$(printf '\x00%.0s' {1..18})" > libs/v2ray-core.aar
+          echo "✅ Placeholder v2ray-core.aar created (UI-only debug build)"
+
+      - name: Apply gradle.properties
+        working-directory: artifacts/elite-net
+        run: cp android-native/gradle.properties android/gradle.properties
+
+      - name: Patch build.gradle files
+        working-directory: artifacts/elite-net/android
+        run: |
+          # App build.gradle
+          sed -i '1s|^|apply plugin: "com.google.gms.google-services"\n|' app/build.gradle
+          sed -i 's/targetSdk [0-9]*/targetSdk 34/' app/build.gradle || true
+          cat >> app/build.gradle << 'GRADLE_EOF'
+
+          android.repositories { flatDir { dirs 'libs' } }
+          dependencies {
+              implementation(name: 'v2ray-core', ext: 'aar')
+              implementation "androidx.core:core-ktx:1.12.0"
+              implementation "androidx.localbroadcastmanager:localbroadcastmanager:1.1.0"
+              implementation "com.unity3d.ads:unity-ads:4.9.2"
+              implementation platform("com.google.firebase:firebase-bom:32.7.0")
+              implementation "com.google.firebase:firebase-messaging-ktx"
+              implementation "androidx.lifecycle:lifecycle-service:2.7.0"
+          }
+          GRADLE_EOF
+          # Project build.gradle
+          sed -i 's|com.android.tools.build:gradle:[0-9.]*|com.android.tools.build:gradle:8.4.0|g' build.gradle || true
+          sed -i 's|dependencies {|dependencies {\n        classpath("com.google.gms:google-services:4.4.2")|' build.gradle
+          if ! grep -q "unityads.unity3d.com" build.gradle; then
+            sed -i '/allprojects/,/^}/ s|repositories {|repositories {\n        maven { url "https://unityads.unity3d.com/ivysettings.xml" }|' build.gradle
+          fi
+
+      # ── Build DEBUG APK (no signing required) ─────────────────────────────
+      - name: Build Debug APK
+        working-directory: artifacts/elite-net/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon --stacktrace
+          echo "✅ Debug APK built"
+          ls -lh app/build/outputs/apk/debug/
+
+      - name: Rename Debug APK
+        working-directory: artifacts/elite-net/android
+        run: |
+          DATE=$(date +%Y%m%d)
+          mv app/build/outputs/apk/debug/app-debug.apk \
+             app/build/outputs/apk/debug/EliteNet-DEBUG-${DATE}.apk
+          echo "Output: $(ls app/build/outputs/apk/debug/*.apk)"
+
+      # ── Upload debug APK — downloadable from Actions tab immediately ───────
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: EliteNet-DEBUG-APK
+          path: artifacts/elite-net/android/app/build/outputs/apk/debug/*.apk
+          retention-days: 14
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # JOB 2 — Signed Release APK + AAB (requires secrets to be set)
+  # Only runs when KEYSTORE_BASE64 secret is configured.
+  # ════════════════════════════════════════════════════════════════════════════
   build:
     name: Build & Sign Release (APK + AAB)
     runs-on: ubuntu-latest
