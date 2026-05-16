@@ -1,24 +1,26 @@
 // ─── Project-level build.gradle ─────────────────────────────────────────────
-// Copy this to: android/build.gradle  (replace the existing file)
+// Google Play 2026 compliant
+// Gradle 8.7  ·  AGP 8.4.0  ·  Kotlin 2.0.0  ·  JDK 17
 
 buildscript {
     ext {
-        buildToolsVersion = "34.0.0"
-        minSdkVersion    = 24
-        compileSdkVersion = 34
-        targetSdkVersion  = 34
-        ndkVersion        = "26.1.10909125"
-        kotlinVersion     = "1.9.10"
+        buildToolsVersion  = "34.0.0"
+        minSdkVersion      = 24          // Android 7.0+
+        compileSdkVersion  = 34          // Android 14
+        targetSdkVersion   = 34          // Required by Play Store 2024+
+        ndkVersion         = "26.1.10909125"
+        kotlinVersion      = "2.0.0"     // Latest stable Kotlin as of 2026
     }
     repositories {
         google()
         mavenCentral()
     }
     dependencies {
-        classpath("com.android.tools.build:gradle:8.2.0")
+        // Android Gradle Plugin 8.4.0 — latest stable as of 2026
+        classpath("com.android.tools.build:gradle:8.4.0")
         classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlinVersion")
-        // Firebase — required for FCM push notifications
-        classpath("com.google.gms:google-services:4.4.0")
+        // Firebase
+        classpath("com.google.gms:google-services:4.4.2")
     }
 }
 
@@ -26,9 +28,7 @@ allprojects {
     repositories {
         google()
         mavenCentral()
-        // Unity Ads SDK repository
         maven { url "https://unityads.unity3d.com/ivysettings.xml" }
-        // Local AARs (v2ray-core.aar lives here)
         flatDir { dirs 'libs' }
     }
 }

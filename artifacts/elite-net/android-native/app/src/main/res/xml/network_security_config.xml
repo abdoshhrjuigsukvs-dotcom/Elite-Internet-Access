@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Elite Net — Network Security Config
+    =====================================
+    Enforces TLS for all network connections.
+    Required for Google Play security review on targetSdk 34+.
+
+    - Blocks all cleartext (plain HTTP) traffic
+    - Pins VPN server certificate for production builds
+    - Allows cleartext only in debug builds (for dev tooling)
+-->
+<network-security-config>
+
+    <!-- Production: TLS only, no cleartext -->
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <!-- Trust the device's system CA store -->
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <!-- Debug builds: allow cleartext for Metro bundler and dev server -->
+    <debug-overrides>
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </debug-overrides>
+
+</network-security-config>

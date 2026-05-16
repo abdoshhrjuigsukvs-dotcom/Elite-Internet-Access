@@ -1,13 +1,14 @@
-name: Build Signed APK
+name: Build Signed APK + AAB
 
+# Triggers: every push to main/master, or manual run from GitHub UI
 on:
   push:
     branches: [main, master]
-  workflow_dispatch:          # allow manual trigger from GitHub UI
+  workflow_dispatch:
 
 jobs:
   build:
-    name: Build & Sign Release APK
+    name: Build & Sign Release (APK + AAB)
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
@@ -16,7 +17,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── 2. Java 17 (required by Android Gradle) ───────────────────────────
+      # ── 2. JDK 17 (required by AGP 8.4 / Gradle 8.7) ────────────────────
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -24,12 +25,17 @@ jobs:
           distribution: "temurin"
           cache: gradle
 
-      # ── 3. Node + pnpm ────────────────────────────────────────────────────
+      # ── 3. Verify Java version ────────────────────────────────────────────
+      - name: Verify Java 17
+        run: |
+          java -version
+          echo "JAVA_HOME=$JAVA_HOME"
+
+      # ── 4. Node 20 + pnpm 9 ──────────────────────────────────────────────
       - name: Set up Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: "npm"
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
@@ -37,40 +43,81 @@ jobs:
           version: 9
           run_install: false
 
-      # ── 4. Install JS dependencies ────────────────────────────────────────
+      # ── 5. Remove stale lock files that break pnpm install ────────────────
+      # (yarn.lock / package-lock.json conflict with pnpm-lock.yaml)
+      - name: Remove conflicting lock files
+        run: |
+          find . -maxdepth 3 \
+            -not -path "*/node_modules/*" \
+            -not -path "*/.git/*" \
+            \( -name "yarn.lock" -o -name "package-lock.json" \) \
+            -delete -print || true
+          echo "✅ Stale lock files removed"
+
+      # ── 6. Install JS dependencies ────────────────────────────────────────
       - name: Install dependencies
         working-directory: artifacts/elite-net
         run: pnpm install --frozen-lockfile
 
-      # ── 5. Expo Prebuild (generates android/ folder) ──────────────────────
+      # ── 7. Expo Prebuild (generates android/ folder) ──────────────────────
       - name: Expo Prebuild
         working-directory: artifacts/elite-net
-        run: |
-          npx expo prebuild --platform android --clean --non-interactive
+        run: npx expo prebuild --platform android --clean --non-interactive
         env:
           EXPO_NO_DOTENV: 1
 
-      # ── 6. Copy prepared native source files ──────────────────────────────
-      - name: Copy native Kotlin source files
+      # ── 8. Copy prepared native Kotlin source files ───────────────────────
+      - name: Copy Kotlin source files
         working-directory: artifacts/elite-net
         run: |
           cp -r android-native/app/src/main/java/com/elitenet/vpn/. \
                 android/app/src/main/java/com/elitenet/vpn/
           cp android-native/app/proguard-rules.pro android/app/proguard-rules.pro
-          echo "✅ Kotlin sources copied"
+          # Copy network security config
+          mkdir -p android/app/src/main/res/xml
+          cp android-native/app/src/main/res/xml/network_security_config.xml \
+             android/app/src/main/res/xml/network_security_config.xml
+          echo "✅ Kotlin sources + security config copied"
+          echo "Files in vpn/: $(ls android/app/src/main/java/com/elitenet/vpn/)"
 
-      # ── 7. Merge AndroidManifest additions ────────────────────────────────
+      # ── 9. Pin Gradle to 8.7 (latest stable) ─────────────────────────────
+      - name: Pin Gradle wrapper to 8.7
+        working-directory: artifacts/elite-net/android
+        run: |
+          cat > gradle/wrapper/gradle-wrapper.properties << 'EOF'
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-8.7-bin.zip
+          networkTimeout=10000
+          validateDistributionUrl=true
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          EOF
+          echo "✅ Gradle pinned to 8.7"
+          cat gradle/wrapper/gradle-wrapper.properties
+
+      # ── 10. Patch AndroidManifest.xml ─────────────────────────────────────
+      # Adds services, permissions, and security config ref.
+      # No android:protectionLevel on uses-permission (invalid since API 31).
       - name: Patch AndroidManifest.xml
         working-directory: artifacts/elite-net/android
         run: |
           MANIFEST="app/src/main/AndroidManifest.xml"
-          # Add VPN service before </application>
-          sed -i 's|</application>|    <service android:name=".V2RayVpnService" android:permission="android.permission.BIND_VPN_SERVICE" android:exported="false" android:foregroundServiceType="connectedDevice"><intent-filter><action android:name="android.net.VpnService"/></intent-filter></service>\n    <service android:name=".EliteFirebaseMessagingService" android:exported="false"><intent-filter><action android:name="com.google.firebase.MESSAGING_EVENT"/></intent-filter></service>\n    <meta-data android:name="com.google.firebase.messaging.default_notification_channel_id" android:value="elite-net-reminders"/>\n</application>|' "$MANIFEST"
-          # Add permissions before <application>
-          sed -i 's|<application|<uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"/>\n    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <uses-permission android:name="android.permission.WAKE_LOCK"/>\n    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE"/>\n    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>\n    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>\n    <application|' "$MANIFEST"
-          echo "✅ AndroidManifest patched"
 
-      # ── 8. Place google-services.json (from GitHub Secret) ────────────────
+          # Add networkSecurityConfig to <application> tag
+          sed -i 's|android:theme="@style/AppTheme"|android:theme="@style/AppTheme"\n        android:networkSecurityConfig="@xml/network_security_config"\n        android:allowBackup="false"|' "$MANIFEST" || true
+
+          # Inject VPN service + FCM service + BootReceiver before </application>
+          sed -i 's|</application>|    <service android:name=".V2RayVpnService" android:exported="false" android:permission="android.permission.BIND_VPN_SERVICE" android:foregroundServiceType="connectedDevice"><intent-filter><action android:name="android.net.VpnService"/></intent-filter></service>\n    <service android:name=".EliteFirebaseMessagingService" android:exported="false"><intent-filter><action android:name="com.google.firebase.MESSAGING_EVENT"/></intent-filter></service>\n    <meta-data android:name="com.google.firebase.messaging.default_notification_channel_id" android:value="elite-net-reminders"/>\n    <receiver android:name=".BootReceiver" android:exported="true"><intent-filter><action android:name="android.intent.action.BOOT_COMPLETED"/></intent-filter></receiver>\n</application>|' "$MANIFEST"
+
+          # Inject minimal permissions before <application>
+          sed -i 's|<application |<uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"/>\n    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <uses-permission android:name="android.permission.WAKE_LOCK"/>\n    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>\n    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>\n    <application |' "$MANIFEST"
+
+          echo "✅ AndroidManifest patched"
+          echo "--- Manifest preview ---"
+          head -60 "$MANIFEST"
+
+      # ── 11. Place google-services.json ────────────────────────────────────
       - name: Place google-services.json
         working-directory: artifacts/elite-net/android/app
         env:
@@ -79,9 +126,9 @@ jobs:
           echo "$GOOGLE_SERVICES_JSON" > google-services.json
           echo "✅ google-services.json placed"
 
-      # ── 9. Download & place V2RayCore AAR ─────────────────────────────────
-      # Option A: decode from GitHub Secret (V2RAY_AAR_BASE64)
-      # Option B: download from GitHub Releases (uncomment if no secret set)
+      # ── 12. Place V2RayCore AAR ───────────────────────────────────────────
+      # Option A: from GITHUB Secret (V2RAY_AAR_BASE64) — preferred
+      # Option B: downloaded from GitHub Releases automatically
       - name: Place V2RayCore AAR
         working-directory: artifacts/elite-net/android/app
         env:
@@ -90,53 +137,55 @@ jobs:
           mkdir -p libs
           if [ -n "$V2RAY_AAR_BASE64" ]; then
             echo "$V2RAY_AAR_BASE64" | base64 --decode > libs/v2ray-core.aar
-            echo "✅ V2RayCore AAR decoded from secret"
+            echo "✅ V2RayCore AAR decoded from secret ($(du -h libs/v2ray-core.aar | cut -f1))"
           else
             echo "⚠️  V2RAY_AAR_BASE64 not set — downloading from GitHub Releases..."
-            curl -L -o libs/v2ray-core.aar \
+            curl -fsSL -o libs/v2ray-core.aar \
               "https://github.com/2dust/v2rayNG/releases/download/1.9.30/v2ray-core.aar" \
-              || { echo "❌ Download failed. Set V2RAY_AAR_BASE64 secret."; exit 1; }
-            echo "✅ V2RayCore AAR downloaded"
+              || { echo "❌ Download failed. Set V2RAY_AAR_BASE64 in GitHub Secrets."; exit 1; }
+            echo "✅ V2RayCore AAR downloaded ($(du -h libs/v2ray-core.aar | cut -f1))"
           fi
 
-      # ── 10. Patch V2Ray server credentials (from GitHub Secrets) ──────────
+      # ── 13. Patch VPN server credentials ─────────────────────────────────
       - name: Patch VPN server credentials
         working-directory: artifacts/elite-net/android/app/src/main/java/com/elitenet/vpn
         env:
           VPN_SERVER_HOST: ${{ secrets.VPN_SERVER_HOST }}
           VPN_SERVER_PORT: ${{ secrets.VPN_SERVER_PORT }}
-          VPN_UUID: ${{ secrets.VPN_UUID }}
-          VPN_WS_PATH: ${{ secrets.VPN_WS_PATH }}
+          VPN_UUID:        ${{ secrets.VPN_UUID }}
+          VPN_WS_PATH:     ${{ secrets.VPN_WS_PATH }}
         run: |
           HOST="${VPN_SERVER_HOST:-YOUR_SERVER_IP_OR_DOMAIN}"
           PORT="${VPN_SERVER_PORT:-443}"
           UUID="${VPN_UUID:-YOUR-VMESS-UUID-HERE}"
-          PATH_="${VPN_WS_PATH:-/elite}"
-          sed -i "s|YOUR_SERVER_IP_OR_DOMAIN|$HOST|g" V2RayVpnService.kt
+          WS="${VPN_WS_PATH:-/elite}"
+          sed -i "s|YOUR_SERVER_IP_OR_DOMAIN|$HOST|g"             V2RayVpnService.kt
           sed -i "s|private const val SERVER_PORT = 443|private const val SERVER_PORT = $PORT|g" V2RayVpnService.kt
-          sed -i "s|YOUR-VMESS-UUID-HERE|$UUID|g" V2RayVpnService.kt
-          sed -i "s|private const val WS_PATH = \"/elite\"|private const val WS_PATH = \"$PATH_\"|g" V2RayVpnService.kt
-          # Uncomment the V2Ray start call
+          sed -i "s|YOUR-VMESS-UUID-HERE|$UUID|g"                  V2RayVpnService.kt
+          sed -i "s|private const val WS_PATH = \"/elite\"|private const val WS_PATH = \"$WS\"|g" V2RayVpnService.kt
           sed -i 's|// v2raycore.V2Ray.startV2Ray(config, fd)|v2raycore.V2Ray.startV2Ray(config, fd)|g' V2RayVpnService.kt
-          echo "✅ VPN credentials patched"
+          echo "✅ VPN credentials patched (host=$HOST port=$PORT)"
 
-      # ── 11. Copy gradle.properties (R8 full mode obfuscation) ────────────────
-      - name: Copy gradle.properties
+      # ── 14. Apply gradle.properties (R8 full-mode obfuscation) ───────────
+      - name: Apply gradle.properties
         working-directory: artifacts/elite-net
         run: |
           cp android-native/gradle.properties android/gradle.properties
-          echo "✅ gradle.properties copied (R8 full mode enabled)"
+          echo "✅ gradle.properties applied"
+          grep "R8\|enableR8\|jvmargs" android/gradle.properties || true
 
-      # ── 12. Patch build.gradle files ──────────────────────────────────────
-      - name: Patch app build.gradle
+      # ── 15. Patch build.gradle files (AGP 8.4, targetSdk 34, deps) ───────
+      - name: Patch app/build.gradle
         working-directory: artifacts/elite-net/android/app
         run: |
-          # Apply Google Services plugin
+          # Apply Firebase Google Services plugin
           sed -i '1s|^|apply plugin: "com.google.gms.google-services"\n|' build.gradle
-          # Bump targetSdk to 34 (required by Play Store 2024+)
-          sed -i 's/targetSdkVersion .*/targetSdkVersion 34/' build.gradle || true
-          sed -i 's/targetSdk .*/targetSdk 34/' build.gradle || true
-          # Add all native dependencies
+
+          # Ensure targetSdk = 34
+          sed -i 's/targetSdkVersion [0-9]*/targetSdkVersion 34/' build.gradle || true
+          sed -i 's/targetSdk [0-9]*/targetSdk 34/' build.gradle           || true
+
+          # Append native dependencies block
           cat >> build.gradle << 'GRADLE_EOF'
 
 android.repositories {
@@ -164,14 +213,16 @@ GRADLE_EOF
       - name: Patch project build.gradle
         working-directory: artifacts/elite-net/android
         run: |
-          sed -i 's|dependencies {|dependencies {\n        classpath("com.google.gms:google-services:4.4.0")|' build.gradle
-          # Add Unity Ads maven repo to allprojects
+          # Upgrade AGP to 8.4.0 and add Google Services classpath
+          sed -i 's|com.android.tools.build:gradle:[0-9.]*|com.android.tools.build:gradle:8.4.0|g' build.gradle || true
+          sed -i 's|dependencies {|dependencies {\n        classpath("com.google.gms:google-services:4.4.2")|' build.gradle
+          # Add Unity Ads repo under allprojects if not already present
           if ! grep -q "unityads.unity3d.com" build.gradle; then
             sed -i '/allprojects/,/^}/ s|repositories {|repositories {\n        maven { url "https://unityads.unity3d.com/ivysettings.xml" }|' build.gradle
           fi
           echo "✅ project build.gradle patched"
 
-      # ── 13. Decode keystore (from GitHub Secret) ──────────────────────────
+      # ── 16. Decode signing keystore ───────────────────────────────────────
       - name: Decode signing keystore
         working-directory: artifacts/elite-net/android/app
         env:
@@ -181,14 +232,14 @@ GRADLE_EOF
           ls -lh elite-net-release.keystore
           echo "✅ Keystore decoded"
 
-      # ── 14. Build Signed APK + AAB ────────────────────────────────────────
-      # APK  → direct install on phone / testing
-      # AAB  → Google Play Store upload (required 2024+)
+      # ── 17. Build Release APK + AAB ───────────────────────────────────────
+      # APK  → install directly on phone for testing
+      # AAB  → upload to Google Play Store (required format since 2024)
       - name: Build Release APK + AAB
         working-directory: artifacts/elite-net/android
         env:
           KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_PASS: ${{ secrets.KEY_PASSWORD }}
+          KEY_PASS:      ${{ secrets.KEY_PASSWORD }}
         run: |
           chmod +x gradlew
           ./gradlew assembleRelease bundleRelease \
@@ -198,23 +249,24 @@ GRADLE_EOF
             -Pandroid.injected.signing.key.password="$KEY_PASS" \
             --no-daemon \
             --stacktrace
+          echo "✅ Build complete"
+          ls -lh app/build/outputs/apk/release/ || true
+          ls -lh app/build/outputs/bundle/release/ || true
 
-      # ── 15. Rename outputs with version + date ────────────────────────────
-      - name: Rename outputs
+      # ── 18. Rename outputs with date stamp ────────────────────────────────
+      - name: Rename build outputs
         working-directory: artifacts/elite-net/android
         run: |
           DATE=$(date +%Y%m%d)
-          # APK
           mv app/build/outputs/apk/release/app-release.apk \
              app/build/outputs/apk/release/EliteNet-v1.0.0-${DATE}.apk
-          # AAB
           mv app/build/outputs/bundle/release/app-release.aab \
              app/build/outputs/bundle/release/EliteNet-v1.0.0-${DATE}.aab
-          echo "✅ Outputs renamed"
-          echo "APK: $(ls app/build/outputs/apk/release/*.apk)"
-          echo "AAB: $(ls app/build/outputs/bundle/release/*.aab)"
+          echo "✅ Outputs:"
+          ls -lh app/build/outputs/apk/release/*.apk
+          ls -lh app/build/outputs/bundle/release/*.aab
 
-      # ── 16. Upload APK artifact (direct install) ──────────────────────────
+      # ── 19. Upload APK artifact (direct phone install) ────────────────────
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
@@ -222,7 +274,7 @@ GRADLE_EOF
           path: artifacts/elite-net/android/app/build/outputs/apk/release/*.apk
           retention-days: 30
 
-      # ── 17. Upload AAB artifact (Play Store) ──────────────────────────────
+      # ── 20. Upload AAB artifact (Google Play Store) ───────────────────────
       - name: Upload AAB artifact
         uses: actions/upload-artifact@v4
         with:
@@ -230,35 +282,37 @@ GRADLE_EOF
           path: artifacts/elite-net/android/app/build/outputs/bundle/release/*.aab
           retention-days: 30
 
-      # ── 18. Create GitHub Release with both files ──────────────────────────
+      # ── 21. Create GitHub Release (main/master only) ──────────────────────
       - name: Create GitHub Release
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v1.0.0-build.${{ github.run_number }}
-          name: "Elite Net v1.0.0 (Build #${{ github.run_number }})"
+          name: "Elite Net VPN v1.0.0 — Build #${{ github.run_number }}"
           body: |
-            ## Elite Net VPN: Safe & Private — Build #${{ github.run_number }}
-            Automatically built and signed from commit `${{ github.sha }}`.
+            ## Elite Net VPN: Safe & Private
+            **Build #${{ github.run_number }}** — commit `${{ github.sha }}`
+            Built with: JDK 17 · Gradle 8.7 · AGP 8.4.0 · targetSdk 34
 
-            | File | Use for |
+            ---
+
+            | File | Purpose |
             |------|---------|
-            | `EliteNet-*.apk` | Direct install on your Android phone |
+            | `EliteNet-*.apk` | Install directly on your Android phone |
             | `EliteNet-*.aab` | Upload to Google Play Store |
 
-            ### Install APK on your phone
-            1. Download `EliteNet-*.apk`
+            ### Install APK directly
+            1. Download `EliteNet-*.apk` to your phone
             2. Settings → Security → Install unknown apps → Allow
             3. Open the APK file → Install
 
-            ### Upload AAB to Play Store
+            ### Upload AAB to Google Play
             1. Download `EliteNet-*.aab`
             2. Google Play Console → Your App → Production → Create new release
             3. Upload the `.aab` file
-            1. Download the APK to your Android phone
-            2. Go to Settings → Security → Install unknown apps → Allow
-            3. Open the APK file to install
-          files: artifacts/elite-net/android/app/build/outputs/apk/release/*.apk
+          files: |
+            artifacts/elite-net/android/app/build/outputs/apk/release/*.apk
+            artifacts/elite-net/android/app/build/outputs/bundle/release/*.aab
           draft: false
           prerelease: false
         env:
