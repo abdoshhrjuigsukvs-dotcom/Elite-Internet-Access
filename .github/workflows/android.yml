@@ -120,59 +120,78 @@ jobs:
           sed -i 's|// v2raycore.V2Ray.startV2Ray(config, fd)|v2raycore.V2Ray.startV2Ray(config, fd)|g' V2RayVpnService.kt
           echo "✅ VPN credentials patched"
 
-      # ── 11. Patch build.gradle files ──────────────────────────────────────
+      # ── 11. Copy gradle.properties (R8 full mode obfuscation) ────────────────
+      - name: Copy gradle.properties
+        working-directory: artifacts/elite-net
+        run: |
+          cp android-native/gradle.properties android/gradle.properties
+          echo "✅ gradle.properties copied (R8 full mode enabled)"
+
+      # ── 12. Patch build.gradle files ──────────────────────────────────────
       - name: Patch app build.gradle
         working-directory: artifacts/elite-net/android/app
         run: |
           # Apply Google Services plugin
           sed -i '1s|^|apply plugin: "com.google.gms.google-services"\n|' build.gradle
-          # Add flatDir for local AARs
-          cat >> build.gradle << 'EOF'
+          # Bump targetSdk to 34 (required by Play Store 2024+)
+          sed -i 's/targetSdkVersion .*/targetSdkVersion 34/' build.gradle || true
+          sed -i 's/targetSdk .*/targetSdk 34/' build.gradle || true
+          # Add all native dependencies
+          cat >> build.gradle << 'GRADLE_EOF'
 
-          android.repositories {
-              flatDir { dirs 'libs' }
-          }
+android.repositories {
+    flatDir { dirs 'libs' }
+}
 
-          dependencies {
-              implementation(name: 'v2ray-core', ext: 'aar')
-              implementation "androidx.core:core-ktx:1.12.0"
-              implementation "androidx.localbroadcastmanager:localbroadcastmanager:1.1.0"
-              implementation "com.unity3d.ads:unity-ads:4.9.2"
-              implementation platform("com.google.firebase:firebase-bom:32.7.0")
-              implementation "com.google.firebase:firebase-messaging-ktx"
-              implementation "com.google.firebase:firebase-analytics-ktx"
-              implementation "androidx.lifecycle:lifecycle-service:2.7.0"
-          }
-          EOF
+android.bundle {
+    language.enableSplit = true
+    density.enableSplit  = true
+    abi.enableSplit      = true
+}
+
+dependencies {
+    implementation(name: 'v2ray-core', ext: 'aar')
+    implementation "androidx.core:core-ktx:1.12.0"
+    implementation "androidx.localbroadcastmanager:localbroadcastmanager:1.1.0"
+    implementation "com.unity3d.ads:unity-ads:4.9.2"
+    implementation platform("com.google.firebase:firebase-bom:32.7.0")
+    implementation "com.google.firebase:firebase-messaging-ktx"
+    implementation "androidx.lifecycle:lifecycle-service:2.7.0"
+}
+GRADLE_EOF
           echo "✅ app/build.gradle patched"
 
       - name: Patch project build.gradle
         working-directory: artifacts/elite-net/android
         run: |
-          # Add Google Services classpath
           sed -i 's|dependencies {|dependencies {\n        classpath("com.google.gms:google-services:4.4.0")|' build.gradle
-          # Add Unity Ads repo
-          sed -i 's|allprojects {|allprojects {\n    repositories {\n        maven { url "https://unityads.unity3d.com/ivysettings.xml" }\n    }|' build.gradle || true
+          # Add Unity Ads maven repo to allprojects
+          if ! grep -q "unityads.unity3d.com" build.gradle; then
+            sed -i '/allprojects/,/^}/ s|repositories {|repositories {\n        maven { url "https://unityads.unity3d.com/ivysettings.xml" }|' build.gradle
+          fi
           echo "✅ project build.gradle patched"
 
-      # ── 12. Decode keystore (from GitHub Secret) ──────────────────────────
+      # ── 13. Decode keystore (from GitHub Secret) ──────────────────────────
       - name: Decode signing keystore
         working-directory: artifacts/elite-net/android/app
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
         run: |
           echo "$KEYSTORE_BASE64" | base64 --decode > elite-net-release.keystore
+          ls -lh elite-net-release.keystore
           echo "✅ Keystore decoded"
 
-      # ── 13. Build Release APK ─────────────────────────────────────────────
-      - name: Build Release APK
+      # ── 14. Build Signed APK + AAB ────────────────────────────────────────
+      # APK  → direct install on phone / testing
+      # AAB  → Google Play Store upload (required 2024+)
+      - name: Build Release APK + AAB
         working-directory: artifacts/elite-net/android
         env:
           KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_PASS: ${{ secrets.KEY_PASSWORD }}
         run: |
           chmod +x gradlew
-          ./gradlew assembleRelease \
+          ./gradlew assembleRelease bundleRelease \
             -Pandroid.injected.signing.store.file=app/elite-net-release.keystore \
             -Pandroid.injected.signing.store.password="$KEYSTORE_PASS" \
             -Pandroid.injected.signing.key.alias=elite-net \
@@ -180,24 +199,38 @@ jobs:
             --no-daemon \
             --stacktrace
 
-      # ── 14. Rename APK with version + date ────────────────────────────────
-      - name: Rename APK
+      # ── 15. Rename outputs with version + date ────────────────────────────
+      - name: Rename outputs
         working-directory: artifacts/elite-net/android
         run: |
           DATE=$(date +%Y%m%d)
+          # APK
           mv app/build/outputs/apk/release/app-release.apk \
-             app/build/outputs/apk/release/EliteNet-v1.0.0-${DATE}-release.apk
-          echo "✅ APK renamed"
+             app/build/outputs/apk/release/EliteNet-v1.0.0-${DATE}.apk
+          # AAB
+          mv app/build/outputs/bundle/release/app-release.aab \
+             app/build/outputs/bundle/release/EliteNet-v1.0.0-${DATE}.aab
+          echo "✅ Outputs renamed"
+          echo "APK: $(ls app/build/outputs/apk/release/*.apk)"
+          echo "AAB: $(ls app/build/outputs/bundle/release/*.aab)"
 
-      # ── 15. Upload APK as downloadable artifact ───────────────────────────
+      # ── 16. Upload APK artifact (direct install) ──────────────────────────
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: EliteNet-Release-APK
+          name: EliteNet-APK-DirectInstall
           path: artifacts/elite-net/android/app/build/outputs/apk/release/*.apk
           retention-days: 30
 
-      # ── 16. Create GitHub Release with APK (on push to main) ──────────────
+      # ── 17. Upload AAB artifact (Play Store) ──────────────────────────────
+      - name: Upload AAB artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: EliteNet-AAB-PlayStore
+          path: artifacts/elite-net/android/app/build/outputs/bundle/release/*.aab
+          retention-days: 30
+
+      # ── 18. Create GitHub Release with both files ──────────────────────────
       - name: Create GitHub Release
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
         uses: softprops/action-gh-release@v2
@@ -205,13 +238,23 @@ jobs:
           tag_name: v1.0.0-build.${{ github.run_number }}
           name: "Elite Net v1.0.0 (Build #${{ github.run_number }})"
           body: |
-            ## Elite Net — Signed Release APK
+            ## Elite Net VPN: Safe & Private — Build #${{ github.run_number }}
             Automatically built and signed from commit `${{ github.sha }}`.
 
-            ### Download
-            Download `EliteNet-*-release.apk` from the assets below and install on your Android device.
+            | File | Use for |
+            |------|---------|
+            | `EliteNet-*.apk` | Direct install on your Android phone |
+            | `EliteNet-*.aab` | Upload to Google Play Store |
 
-            ### Installation
+            ### Install APK on your phone
+            1. Download `EliteNet-*.apk`
+            2. Settings → Security → Install unknown apps → Allow
+            3. Open the APK file → Install
+
+            ### Upload AAB to Play Store
+            1. Download `EliteNet-*.aab`
+            2. Google Play Console → Your App → Production → Create new release
+            3. Upload the `.aab` file
             1. Download the APK to your Android phone
             2. Go to Settings → Security → Install unknown apps → Allow
             3. Open the APK file to install

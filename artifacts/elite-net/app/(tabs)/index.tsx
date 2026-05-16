@@ -3,7 +3,7 @@ import * as Haptics from "expo-haptics";
 import { LinearGradient } from "expo-linear-gradient";
 import { useRouter } from "expo-router";
 import { StatusBar } from "expo-status-bar";
-import React from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import {
   Platform,
   Pressable,
@@ -19,6 +19,11 @@ import { EnergyCore } from "@/components/EnergyCore";
 import { GlassCard } from "@/components/GlassCard";
 import { ParticleField } from "@/components/ParticleField";
 import { TimerRing } from "@/components/TimerRing";
+import {
+  VpnConsentDialog,
+  hasVpnConsent,
+  saveVpnConsent,
+} from "@/components/VpnConsentDialog";
 import { useVpn } from "@/contexts/VpnContext";
 
 const SERVERS = [
@@ -45,6 +50,44 @@ export default function HomeScreen() {
     disconnect,
     requestBooster,
   } = useVpn();
+
+  // VPN consent dialog — required by Google Play policy
+  const [consentVisible, setConsentVisible] = useState(false);
+  const [consentChecked, setConsentChecked] = useState(false);
+  const [pendingConnect, setPendingConnect] = useState(false);
+
+  useEffect(() => {
+    hasVpnConsent().then((has) => setConsentChecked(has));
+  }, []);
+
+  const handleConnectPress = useCallback(async () => {
+    if (isConnected) {
+      disconnect();
+      return;
+    }
+    const hasConsent = await hasVpnConsent();
+    if (hasConsent) {
+      requestConnect();
+    } else {
+      setPendingConnect(true);
+      setConsentVisible(true);
+    }
+  }, [isConnected, disconnect, requestConnect]);
+
+  const handleConsentAccept = useCallback(async () => {
+    await saveVpnConsent();
+    setConsentVisible(false);
+    setConsentChecked(true);
+    if (pendingConnect) {
+      setPendingConnect(false);
+      requestConnect();
+    }
+  }, [pendingConnect, requestConnect]);
+
+  const handleConsentDecline = useCallback(() => {
+    setConsentVisible(false);
+    setPendingConnect(false);
+  }, []);
 
   const isConnected = phase === "connected";
   const isConnecting = phase === "connecting";
@@ -142,7 +185,7 @@ export default function HomeScreen() {
             <View style={styles.coreCenter} pointerEvents="box-none">
               <EnergyCore
                 phase={phase}
-                onPress={isConnected ? disconnect : requestConnect}
+                onPress={handleConnectPress}
               />
             </View>
           </View>
@@ -241,6 +284,14 @@ export default function HomeScreen() {
       </View>
 
       <AdGateModal />
+
+      {/* VPN consent dialog — shown once before first connection */}
+      {/* Required by Google Play VPN policy */}
+      <VpnConsentDialog
+        visible={consentVisible}
+        onAccept={handleConsentAccept}
+        onDecline={handleConsentDecline}
+      />
     </View>
   );
 }
